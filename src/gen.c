@@ -159,10 +159,15 @@ static int codegen_datasec_def(struct bpf_object *obj,
 	if (!get_datasec_ident(sec_name, sec_ident, sizeof(sec_ident)))
 		return 0;
 
-	if (strcmp(sec_name, ".kconfig") != 0)
+	if (strcmp(sec_name, ".kconfig") != 0 || json_output)
 		strip_mods = true;
-
-	printf("	struct %s__%s {\n", obj_name, sec_ident);
+	if (json_output) {
+		jsonw_start_object(json_wtr);
+		jsonw_string_field(json_wtr, "name", sec_name);
+		jsonw_name(json_wtr, "variables");
+		jsonw_start_array(json_wtr);
+	} else
+		printf("	struct %s__%s {\n", obj_name, sec_ident);
 	for (i = 0; i < vlen; i++, sec_var++) {
 		const struct btf_type *var = btf__type_by_id(btf, sec_var->type);
 		const char *var_name = btf__name_by_offset(btf, var->name_off);
@@ -204,11 +209,18 @@ static int codegen_datasec_def(struct bpf_object *obj,
 		 */
 		if (align > 4)
 			align = 4;
-
+		if (json_output) {
+			jsonw_start_object(json_wtr);
+		}
 		align_off = (off + align - 1) / align * align;
 		if (align_off != need_off) {
-			printf("\t\tchar __pad%d[%d];\n",
+			if (json_output) {
+				jsonw_string_field(json_wtr, "name", "__padding");
+				jsonw_int_field(json_wtr, "size", need_off - off);
+			} else {
+				printf("\t\tchar __pad%d[%d];\n",
 			       pad_cnt, need_off - off);
+			}
 			pad_cnt++;
 		}
 
@@ -219,16 +231,35 @@ static int codegen_datasec_def(struct bpf_object *obj,
 		var_ident[0] = '\0';
 		strncat(var_ident, var_name, sizeof(var_ident) - 1);
 		sanitize_identifier(var_ident);
-
-		printf("\t\t");
-		err = btf_dump__emit_type_decl(d, var_type_id, &opts);
-		if (err)
-			return err;
-		printf(";\n");
+		if (json_output) {
+			jsonw_string_field(json_wtr, "name", var_ident);
+			jsonw_int_field(json_wtr, "size",  sec_var->size);
+			jsonw_int_field(json_wtr, "offset",  sec_var->offset);
+			jsonw_name(json_wtr, "type");
+			printf("\"");
+			opts.field_name = "";
+			err = btf_dump__emit_type_decl(d, var_type_id, &opts);
+			if (err)
+				return err;
+			printf("\"");
+		} else {
+			printf("\t\t");
+			err = btf_dump__emit_type_decl(d, var_type_id, &opts);
+			if (err)
+				return err;
+			printf(";\n");
+		}
+		if (json_output) {
+			jsonw_end_object(json_wtr);
+		}
 
 		off = sec_var->offset + sec_var->size;
 	}
-	printf("	} *%s;\n", sec_ident);
+	if (json_output) {
+		jsonw_end_array(json_wtr);
+		jsonw_end_object(json_wtr);
+	} else
+		printf("	} *%s;\n", sec_ident);
 	return 0;
 }
 
@@ -285,6 +316,13 @@ static int codegen_datasecs(struct bpf_object *obj, const char *obj_name)
 	if (!d)
 		return -errno;
 
+	err = libbpf_get_error(d);
+	if (err)
+		return err;
+	if (json_output) {
+		jsonw_name(json_wtr, "data_sections");
+		jsonw_start_array(json_wtr);
+	}
 	bpf_object__for_each_map(map, obj) {
 		/* only generate definitions for memory-mapped internal maps */
 		if (!is_mmapable_map(map, map_ident, sizeof(map_ident)))
@@ -299,7 +337,7 @@ static int codegen_datasecs(struct bpf_object *obj, const char *obj_name)
 		 * map. It will still be memory-mapped and its contents
 		 * accessible from user-space through BPF skeleton.
 		 */
-		if (!sec) {
+		if (!sec && !json_output) {
 			printf("	struct %s__%s {\n", obj_name, map_ident);
 			printf("	} *%s;\n", map_ident);
 		} else {
@@ -309,7 +347,8 @@ static int codegen_datasecs(struct bpf_object *obj, const char *obj_name)
 		}
 	}
 
-
+	if (json_output)
+		jsonw_end_array(json_wtr);
 out:
 	btf_dump__free(d);
 	return err;
@@ -413,6 +452,9 @@ static void codegen(const char *template, ...)
 	va_list args;
 	char c;
 
+	if (json_output) {
+		return;
+	}
 	n = strlen(template);
 	s = malloc(n + 1);
 	if (!s)
@@ -888,6 +930,11 @@ codegen_maps_skeleton(struct bpf_object *obj, size_t map_cnt, bool mmaped, bool 
 		",
 		map_cnt, map_sz, map_sz, map_sz
 	);
+	if (json_output) {
+		jsonw_name(json_wtr, "maps");
+		jsonw_start_array(json_wtr);
+	}
+
 	i = 0;
 	bpf_object__for_each_map(map, obj) {
 		if (!get_map_ident(map, ident, sizeof(ident)))
@@ -901,9 +948,21 @@ codegen_maps_skeleton(struct bpf_object *obj, size_t map_cnt, bool mmaped, bool 
 				map->map = &obj->maps.%s;	    \n\
 			",
 			i, bpf_map__name(map), ident);
+		if (json_output) {
+			jsonw_start_object(json_wtr);
+			jsonw_name(json_wtr, "name");
+			jsonw_string(json_wtr, bpf_map__name(map));
+			jsonw_name(json_wtr, "ident");
+			jsonw_string(json_wtr, ident);
+		}
 		/* memory-mapped internal maps */
 		if (mmaped && is_mmapable_map(map, ident, sizeof(ident))) {
-			printf("\tmap->mmaped = (void **)&obj->%s;\n", ident);
+			if (json_output) {
+				jsonw_name(json_wtr, "mmaped");
+				jsonw_bool(json_wtr, true);
+			} else {
+				printf("\tmap->mmaped = (void **)&obj->%s;\n", ident);
+			}
 		}
 
 		if (populate_links && bpf_map__type(map) == BPF_MAP_TYPE_STRUCT_OPS) {
@@ -911,8 +970,15 @@ codegen_maps_skeleton(struct bpf_object *obj, size_t map_cnt, bool mmaped, bool 
 				\n\
 					map->link = &obj->links.%s; \n\
 				", ident);
+
+		}
+		if (json_output) {
+			jsonw_end_object(json_wtr);
 		}
 		i++;
+	}
+	if (json_output) {
+		jsonw_end_array(json_wtr);
 	}
 }
 
@@ -924,7 +990,10 @@ codegen_progs_skeleton(struct bpf_object *obj, size_t prog_cnt, bool populate_li
 
 	if (!prog_cnt)
 		return;
-
+	if (json_output) {
+		jsonw_name(json_wtr, "progs");
+		jsonw_start_array(json_wtr);
+	}
 	codegen("\
 		\n\
 									\n\
@@ -948,15 +1017,30 @@ codegen_progs_skeleton(struct bpf_object *obj, size_t prog_cnt, bool populate_li
 				s->progs[%1$zu].prog = &obj->progs.%2$s;\n\
 			",
 			i, bpf_program__name(prog));
-
+		if (json_output) {
+			jsonw_start_object(json_wtr);
+			jsonw_name(json_wtr, "name");
+			jsonw_string(json_wtr, bpf_program__name(prog));
+			jsonw_string_field(json_wtr, "attach", bpf_program__section_name(prog));
+		}
 		if (populate_links) {
 			codegen("\
 				\n\
 					s->progs[%1$zu].link = &obj->links.%2$s;\n\
 				",
 				i, bpf_program__name(prog));
+			if (json_output) {
+				jsonw_name(json_wtr, "link");
+				jsonw_bool(json_wtr, true);
+			}
+		}
+		if (json_output) {
+			jsonw_end_object(json_wtr);
 		}
 		i++;
+	}
+	if (json_output) {
+		jsonw_end_array(json_wtr);
 	}
 }
 
@@ -1298,7 +1382,7 @@ static int do_skeleton(int argc, char **argv)
 		);
 	}
 
-	if (map_cnt) {
+	if (map_cnt && !json_output) {
 		printf("\tstruct {\n");
 		bpf_object__for_each_map(map, obj) {
 			if (!get_map_ident(map, ident, sizeof(ident)))
@@ -1316,7 +1400,7 @@ static int do_skeleton(int argc, char **argv)
 	if (err)
 		goto out;
 
-	if (prog_cnt) {
+	if (prog_cnt && !json_output) {
 		printf("\tstruct {\n");
 		bpf_object__for_each_program(prog, obj) {
 			if (use_loader)
@@ -1354,13 +1438,16 @@ static int do_skeleton(int argc, char **argv)
 
 		printf("\t} links;\n");
 	}
+	if (json_output) {
+		jsonw_start_object(json_wtr);
+	}
 
 	if (btf) {
 		err = codegen_datasecs(obj, obj_name);
 		if (err)
 			goto out;
 	}
-	if (use_loader) {
+	if (use_loader && !json_output) {
 		err = gen_trace(obj, obj_name, header_guard);
 		goto out;
 	}
@@ -1469,6 +1556,10 @@ static int do_skeleton(int argc, char **argv)
 		",
 		obj_name
 	);
+	if (json_output) {
+		jsonw_name(json_wtr, "obj_name");
+		jsonw_string(json_wtr, obj_name);
+	}
 
 	codegen("\
 		\n\
@@ -1517,8 +1608,10 @@ static int do_skeleton(int argc, char **argv)
 		obj_name
 	);
 
-	/* embed contents of BPF object file */
-	print_hex(obj_data, file_sz);
+	if (!json_output) {
+		/* embed contents of BPF object file */
+		print_hex(obj_data, file_sz);
+	}
 
 	codegen("\
 		\n\
@@ -1540,8 +1633,9 @@ static int do_skeleton(int argc, char **argv)
 									    \n\
 		",
 		obj_name);
-
-	codegen_asserts(obj, obj_name);
+	if (!json_output) {
+		codegen_asserts(obj, obj_name);
+	}
 
 	codegen("\
 		\n\
@@ -1550,6 +1644,10 @@ static int do_skeleton(int argc, char **argv)
 		",
 		header_guard);
 	err = 0;
+	if (json_output) {
+		jsonw_end_object(json_wtr);
+	}
+
 out:
 	bpf_object__close(obj);
 	if (obj_data)

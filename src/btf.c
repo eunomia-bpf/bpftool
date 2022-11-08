@@ -11,13 +11,14 @@
 #include <linux/btf.h>
 #include <sys/types.h>
 #include <sys/stat.h>
-
+#include <assert.h>
 #include <bpf/bpf.h>
 #include <bpf/btf.h>
 #include <bpf/hashmap.h>
 #include <bpf/libbpf.h>
 
 #include "json_writer.h"
+#include "base64_encode.h"
 #include "main.h"
 
 #define KFUNC_DECL_TAG		"bpf_kfunc"
@@ -727,6 +728,60 @@ static bool btf_is_kernel_module(__u32 btf_id)
 	return btf_info.kernel_btf && strncmp(btf_name, "vmlinux", sizeof(btf_name)) != 0;
 }
 
+static int dump__btf_struct_json(const struct btf *btf, __u32 id,
+			 const struct btf_type *t) {
+	const struct btf_member *m = (const void *)(t + 1);
+	__u16 vlen = BTF_INFO_VLEN(t->info);
+	int i, err;
+	DECLARE_LIBBPF_OPTS(btf_dump_emit_type_decl_opts, opts,
+		.field_name = "",
+		.indent_level = 2,
+	);
+	struct btf_dump *d = btf_dump__new(btf, btf_dump_printf, NULL, NULL);
+
+	jsonw_start_object(json_wtr);
+	jsonw_uint_field(json_wtr, "type_id", id);
+	jsonw_uint_field(json_wtr, "size", t->size);
+	jsonw_name(json_wtr, "members");
+	jsonw_start_array(json_wtr);
+	for (i = 0; i < vlen; i++, m++) {
+		const char *name = btf_str(btf, m->name_off);
+		__u32 bit_off, bit_sz, size;
+
+		if (BTF_INFO_KFLAG(t->info)) {
+			bit_off = BTF_MEMBER_BIT_OFFSET(m->offset);
+			bit_sz = BTF_MEMBER_BITFIELD_SIZE(m->offset);
+		} else {
+			bit_off = m->offset;
+			bit_sz = 0;
+		}
+
+		jsonw_start_object(json_wtr);
+		jsonw_string_field(json_wtr, "name", name);
+		jsonw_uint_field(json_wtr, "type_id", m->type);
+		size = btf__resolve_size(btf, m->type);
+		jsonw_uint_field(json_wtr, "size", size);
+		jsonw_uint_field(json_wtr, "offset", bit_off / 8);
+		assert(bit_off % 8 == 0);
+		jsonw_name(json_wtr, "type");
+		printf("\"");
+		opts.field_name = "";
+		err = btf_dump__emit_type_decl(d, m->type, &opts);
+		if (err)
+			return err;
+		printf("\"");
+
+		if (bit_sz) {
+			jsonw_uint_field(json_wtr, "bit_size",
+							 bit_sz);
+		}
+		jsonw_end_object(json_wtr);
+	}
+	jsonw_end_array(json_wtr);
+	jsonw_end_object(json_wtr);
+	return 0;
+}
+
 static int do_dump(int argc, char **argv)
 {
 	bool dump_c = false, sort_dump_c = true;
@@ -870,9 +925,31 @@ static int do_dump(int argc, char **argv)
 
 	if (dump_c) {
 		if (json_output) {
-			p_err("JSON output for C-syntax dump is not supported");
-			err = -ENOTSUP;
-			goto done;
+			const struct btf_type *t;
+			const struct btf *dump_base;
+			const void * btf_raw_data;
+			int cnt = btf__type_cnt(btf);
+			int start_id = 1;
+			unsigned int raw_data_size;
+
+			jsonw_start_object(json_wtr);
+			dump_base = btf__base_btf(btf);
+			if (dump_base)
+				start_id = btf__type_cnt(dump_base);
+			btf_raw_data = btf__raw_data(btf, &raw_data_size);
+			jsonw_string_field(json_wtr, "raw_btf", 
+				(char*)base64_encode(btf_raw_data, raw_data_size, NULL));
+			jsonw_name(json_wtr, "structs");
+			jsonw_start_array(json_wtr);
+			for (int i = start_id; i < cnt; i++) {
+				t = btf__type_by_id(btf, i);
+				if (!btf_is_struct(t))
+					continue;
+				dump__btf_struct_json(btf, i, t);
+			}
+			jsonw_end_array(json_wtr);
+			jsonw_end_object(json_wtr);
+			return 0;
 		}
 		err = dump_btf_c(btf, root_type_ids, root_type_cnt, sort_dump_c);
 	} else {
