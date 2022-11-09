@@ -235,22 +235,25 @@ static int codegen_datasec_def(struct bpf_object *obj,
 			jsonw_string_field(json_wtr, "name", var_ident);
 			jsonw_int_field(json_wtr, "size",  sec_var->size);
 			jsonw_int_field(json_wtr, "offset",  sec_var->offset);
-			jsonw_name(json_wtr, "type");
-			printf("\"");
-			opts.field_name = "";
-			err = btf_dump__emit_type_decl(d, var_type_id, &opts);
-			if (err)
-				return err;
-			printf("\"");
+			jsonw_uint_field(json_wtr, "type_id", sec_var->type);
+			if (btf_is_composite(var)) {
+				jsonw_string_field(json_wtr, "type", "composite");
+			} else {
+				jsonw_name(json_wtr, "type");
+				printf("\"");
+				opts.field_name = "";
+				err = btf_dump__emit_type_decl(d, var_type_id, &opts);
+				if (err)
+					return err;
+				printf("\"");
+			}
+			jsonw_end_object(json_wtr);
 		} else {
 			printf("\t\t");
 			err = btf_dump__emit_type_decl(d, var_type_id, &opts);
 			if (err)
 				return err;
 			printf(";\n");
-		}
-		if (json_output) {
-			jsonw_end_object(json_wtr);
 		}
 
 		off = sec_var->offset + sec_var->size;

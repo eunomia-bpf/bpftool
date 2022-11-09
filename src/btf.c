@@ -18,7 +18,7 @@
 #include <bpf/libbpf.h>
 
 #include "json_writer.h"
-#include "base64_encode.h"
+
 #include "main.h"
 
 #define KFUNC_DECL_TAG		"bpf_kfunc"
@@ -742,6 +742,7 @@ static int dump__btf_struct_json(const struct btf *btf, __u32 id,
 	jsonw_start_object(json_wtr);
 	jsonw_uint_field(json_wtr, "type_id", id);
 	jsonw_uint_field(json_wtr, "size", t->size);
+	jsonw_string_field(json_wtr, "name", btf_str(btf, t->name_off));
 	jsonw_name(json_wtr, "members");
 	jsonw_start_array(json_wtr);
 	for (i = 0; i < vlen; i++, m++) {
@@ -755,23 +756,25 @@ static int dump__btf_struct_json(const struct btf *btf, __u32 id,
 			bit_off = m->offset;
 			bit_sz = 0;
 		}
-
 		jsonw_start_object(json_wtr);
 		jsonw_string_field(json_wtr, "name", name);
-		jsonw_uint_field(json_wtr, "type_id", m->type);
 		size = btf__resolve_size(btf, m->type);
 		jsonw_uint_field(json_wtr, "size", size);
-		jsonw_uint_field(json_wtr, "offset", bit_off / 8);
-		assert(bit_off % 8 == 0);
-		jsonw_name(json_wtr, "type");
-		printf("\"");
-		opts.field_name = "";
-		err = btf_dump__emit_type_decl(d, m->type, &opts);
-		if (err)
-			return err;
-		printf("\"");
+		jsonw_uint_field(json_wtr, "bit_offset", bit_off);
+		if (btf_is_composite(btf__type_by_id(btf, m->type))) {
+			jsonw_string_field(json_wtr, "type", "composite");
+		} else {
+			jsonw_name(json_wtr, "type");
+			printf("\"");
+			opts.field_name = "";
+			err = btf_dump__emit_type_decl(d, m->type, &opts);
+			if (err)
+				return err;
+			printf("\"");
+		}
 
 		if (bit_sz) {
+			printf(",");
 			jsonw_uint_field(json_wtr, "bit_size",
 							 bit_sz);
 		}
@@ -926,19 +929,10 @@ static int do_dump(int argc, char **argv)
 	if (dump_c) {
 		if (json_output) {
 			const struct btf_type *t;
-			const struct btf *dump_base;
-			const void * btf_raw_data;
 			int cnt = btf__type_cnt(btf);
 			int start_id = 1;
-			unsigned int raw_data_size;
 
 			jsonw_start_object(json_wtr);
-			dump_base = btf__base_btf(btf);
-			if (dump_base)
-				start_id = btf__type_cnt(dump_base);
-			btf_raw_data = btf__raw_data(btf, &raw_data_size);
-			jsonw_string_field(json_wtr, "raw_btf", 
-				(char*)base64_encode(btf_raw_data, raw_data_size, NULL));
 			jsonw_name(json_wtr, "structs");
 			jsonw_start_array(json_wtr);
 			for (int i = start_id; i < cnt; i++) {
