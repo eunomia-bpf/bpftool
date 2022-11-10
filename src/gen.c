@@ -235,7 +235,7 @@ static int codegen_datasec_def(struct bpf_object *obj,
 			jsonw_string_field(json_wtr, "name", var_ident);
 			jsonw_int_field(json_wtr, "size",  sec_var->size);
 			jsonw_int_field(json_wtr, "offset",  sec_var->offset);
-			jsonw_uint_field(json_wtr, "type_id", sec_var->type);
+			jsonw_uint_field(json_wtr, "type_id", var_type_id);
 			if (btf_is_composite(var)) {
 				jsonw_string_field(json_wtr, "type", "composite");
 			} else {
