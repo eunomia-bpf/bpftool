@@ -582,7 +582,10 @@ static int dump__btf_struct_json(const struct btf *btf, __u32 id,
 		// jsonw_uint_field(json_wtr, "bit_offset", bit_off);
 		if (btf_is_composite(btf__type_by_id(btf, m->type))) {
 			jsonw_string_field(json_wtr, "type", "composite");
-		} else {
+		} else if (btf_is_enum(btf__type_by_id(btf, m->type))) {
+			jsonw_string_field(json_wtr, "type", "enum");
+		}
+		 else {
 			jsonw_name(json_wtr, "type");
 			printf("\"");
 			opts.field_name = "";
