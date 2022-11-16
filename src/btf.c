@@ -567,20 +567,19 @@ static int dump__btf_struct_json(const struct btf *btf, __u32 id,
 	jsonw_start_array(json_wtr);
 	for (i = 0; i < vlen; i++, m++) {
 		const char *name = btf_str(btf, m->name_off);
-		__u32 bit_off, bit_sz, size;
 
-		if (BTF_INFO_KFLAG(t->info)) {
-			bit_off = BTF_MEMBER_BIT_OFFSET(m->offset);
-			bit_sz = BTF_MEMBER_BITFIELD_SIZE(m->offset);
-		} else {
-			bit_off = m->offset;
-			bit_sz = 0;
-		}
+		// if (BTF_INFO_KFLAG(t->info)) {
+		// 	bit_off = BTF_MEMBER_BIT_OFFSET(m->offset);
+		// 	bit_sz = BTF_MEMBER_BITFIELD_SIZE(m->offset);
+		// } else {
+		// 	bit_off = m->offset;
+		// 	bit_sz = 0;
+		// }
 		jsonw_start_object(json_wtr);
 		jsonw_string_field(json_wtr, "name", name);
-		size = btf__resolve_size(btf, m->type);
-		jsonw_uint_field(json_wtr, "size", size);
-		jsonw_uint_field(json_wtr, "bit_offset", bit_off);
+		// size = btf__resolve_size(btf, m->type);
+		// jsonw_uint_field(json_wtr, "size", size);
+		// jsonw_uint_field(json_wtr, "bit_offset", bit_off);
 		if (btf_is_composite(btf__type_by_id(btf, m->type))) {
 			jsonw_string_field(json_wtr, "type", "composite");
 		} else {
@@ -593,11 +592,11 @@ static int dump__btf_struct_json(const struct btf *btf, __u32 id,
 			printf("\"");
 		}
 
-		if (bit_sz) {
-			printf(",");
-			jsonw_uint_field(json_wtr, "bit_size",
-							 bit_sz);
-		}
+		// if (bit_sz) {
+		// 	printf(",");
+		// 	jsonw_uint_field(json_wtr, "bit_size",
+		// 					 bit_sz);
+		// }
 		jsonw_end_object(json_wtr);
 	}
 	jsonw_end_array(json_wtr);
