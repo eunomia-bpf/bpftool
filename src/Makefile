@@ -131,7 +131,7 @@ include $(wildcard $(OUTPUT)*.d)
 
 all: $(OUTPUT)bpftool
 
-SRCS := $(wildcard *.c)
+SRCS = $(filter-out $(BFD_SRCS) pids.c,$(wildcard *.c))
 
 ifeq ($(feature-llvm),1)
   # If LLVM is available, use it for JIT disassembly
