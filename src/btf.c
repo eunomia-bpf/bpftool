@@ -700,7 +700,6 @@ static int do_dump(int argc, char **argv)
 	__u32 root_type_ids[2];
 	int root_type_cnt = 0;
 	bool dump_c = false;
-	bool dump_wasm = false;
 	__u32 btf_id = -1;
 	const char *src;
 	int fd = -1;
@@ -804,8 +803,6 @@ static int do_dump(int argc, char **argv)
 				dump_c = true;
 			} else if (strcmp(*argv, "raw") == 0) {
 				dump_c = false;
-			} else if (strcmp(*argv, "wasm") == 0) {
-				dump_wasm = true;
 			} else {
 				p_err("unrecognized format specifier: '%s', possible values: raw, c",
 				      *argv);
@@ -837,13 +834,13 @@ static int do_dump(int argc, char **argv)
 
 	if (dump_c) {
 		if (json_output) {
-			p_err("JSON output for C-syntax dump is not supported");
-			err = -ENOTSUP;
-			goto done;
+			p_err("JSON output for C-syntax dump is not supported, emit wasm instead");
+			emit_for_wasm = true;
 		}
-		err = dump_btf_c(btf, root_type_ids, root_type_cnt);
-	} else if (dump_wasm) {
-		err = dump_btf_wasm(btf, root_type_ids, root_type_cnt);
+		if (emit_for_wasm) {
+			err = dump_btf_wasm(btf, root_type_ids, root_type_cnt);
+		} else 
+			err = dump_btf_c(btf, root_type_ids, root_type_cnt);
 	}
 	else {
 		err = dump_btf_raw(btf, root_type_ids, root_type_cnt);
