@@ -460,6 +460,124 @@ static void __printf(2, 0) btf_dump_printf(void *ctx,
 	vfprintf(stdout, fmt, args);
 }
 
+static int
+btf_dump_map_struct_layout(const struct btf *btf, struct btf_dump *d, __u32 id) {
+	int err;
+	const char* name;
+	struct btf_member *m;
+	uint32_t field_size;
+	uint32_t struct_size, off = 0, pad_cnt = 0;
+	uint32_t offset;
+	__u16 vlen;
+	const struct btf_type* field_type;
+	const struct btf_type * t = btf__type_by_id(btf, id);
+    if (!t) {
+		return -EINVAL;
+    }
+    name = btf__name_by_offset(btf, t->name_off);
+    if (!btf_is_struct(t)) {
+		err = btf_dump__dump_type(d, id);
+		return err;
+    }
+    m = btf_members(t);
+    vlen = BTF_INFO_VLEN(t->info);
+    struct_size = btf__resolve_size(btf, id);
+    for (size_t i = 0; i < vlen; i++, m++) {
+        // found btf type id
+        uint32_t bit_off, bit_sz;
+
+        if (BTF_INFO_KFLAG(t->info)) {
+            bit_off = BTF_MEMBER_BIT_OFFSET(m->offset);
+            bit_sz = BTF_MEMBER_BITFIELD_SIZE(m->offset);
+        }
+        else {
+            bit_off = m->offset;
+            bit_sz = 0;
+        }
+        field_size = btf__resolve_size(btf, m->type);
+        field_type = btf__type_by_id(btf, m->type);
+
+		offset = bit_off / 8;
+		if (off > offset) {
+			printf("error: offset %d > need_off %d for %s", off, offset, name);
+		}
+		if (off < offset) {
+			printf("    char __pad%d[%d];\n", pad_cnt,
+								offset - off);
+			pad_cnt++;
+		}
+		// avid pointer use
+		if (btf_is_ptr(field_type)) {
+			int ptr_type_id = -1;
+			int ptr_size = btf__pointer_size(btf);
+			if (ptr_size == 8) {
+				ptr_type_id = btf__find_by_name(btf, "uint64_t");
+				if (ptr_type_id < 0) {
+					ptr_type_id = btf__add_int((struct btf *)btf, "uint64_t", 8, 0);
+				}
+			}
+			else if (ptr_size == 4) {
+				ptr_type_id = btf__find_by_name(btf, "uint32_t");
+				if (ptr_type_id < 0) {
+					ptr_type_id = btf__add_int((struct btf *)btf, "uint32_t", 4, 0);
+				}
+			}
+			else {
+				fprintf(stderr, "error: unsupported pointer size %d\n", ptr_size);
+			}
+			if (ptr_type_id < 0) {
+				fprintf(stderr, "error: fail to find pointer type\n");
+			}
+		}
+		printf("    ");
+		err = btf_dump__dump_type(d, id);
+		if (err) {
+			return err;
+		}
+		printf(";\n");
+
+		off = offset + field_size;
+    }
+	return 0;
+}
+
+
+static int dump_btf_wasm(const struct btf *btf,
+		      __u32 *root_type_ids, int root_type_cnt)
+{
+	struct btf_dump *d;
+	int err = 0, i;
+
+	d = btf_dump__new(btf, btf_dump_printf, NULL, NULL);
+	if (!d)
+		return -errno;
+	printf("#ifndef _BPF_WASM_EVENT_H_\n");
+	printf("#define _BPF_WASM_EVENT_H_\n");
+
+	if (root_type_cnt) {
+		for (i = 0; i < root_type_cnt; i++) {
+			err = btf_dump_map_struct_layout(btf, d, root_type_ids[i]);
+			if (err)
+				goto done;
+		}
+	} else {
+		int cnt = btf__type_cnt(btf);
+
+		for (i = 1; i < cnt; i++) {
+				err = btf_dump_map_struct_layout(btf, d, i);
+			if (err)
+				goto done;
+		}
+	}
+
+	printf("\n");
+	printf("#endif /* __VMLINUX_H__ */\n");
+
+done:
+	btf_dump__free(d);
+	return err;
+}
+
 static int dump_btf_c(const struct btf *btf,
 		      __u32 *root_type_ids, int root_type_cnt)
 {
@@ -479,7 +597,7 @@ static int dump_btf_c(const struct btf *btf,
 
 	if (root_type_cnt) {
 		for (i = 0; i < root_type_cnt; i++) {
-			err = btf_dump__dump_type(d, root_type_ids[i]);
+				err = btf_dump__dump_type(d, root_type_ids[i]);
 			if (err)
 				goto done;
 		}
@@ -553,6 +671,7 @@ static int do_dump(int argc, char **argv)
 	__u32 root_type_ids[2];
 	int root_type_cnt = 0;
 	bool dump_c = false;
+	bool dump_wasm = false;
 	__u32 btf_id = -1;
 	const char *src;
 	int fd = -1;
@@ -656,6 +775,8 @@ static int do_dump(int argc, char **argv)
 				dump_c = true;
 			} else if (strcmp(*argv, "raw") == 0) {
 				dump_c = false;
+			} else if (strcmp(*argv, "wasm") == 0) {
+				dump_wasm = true;
 			} else {
 				p_err("unrecognized format specifier: '%s', possible values: raw, c",
 				      *argv);
@@ -692,7 +813,10 @@ static int do_dump(int argc, char **argv)
 			goto done;
 		}
 		err = dump_btf_c(btf, root_type_ids, root_type_cnt);
-	} else {
+	} else if (dump_wasm) {
+		err = dump_btf_wasm(btf, root_type_ids, root_type_cnt);
+	}
+	 else {
 		err = dump_btf_raw(btf, root_type_ids, root_type_cnt);
 	}
 
@@ -1060,7 +1184,7 @@ static int do_help(int argc, char **argv)
 		"       %1$s %2$s help\n"
 		"\n"
 		"       BTF_SRC := { id BTF_ID | prog PROG | map MAP [{key | value | kv | all}] | file FILE }\n"
-		"       FORMAT  := { raw | c }\n"
+		"       FORMAT  := { raw | c | wasm }\n"
 		"       " HELP_SPEC_MAP "\n"
 		"       " HELP_SPEC_PROGRAM "\n"
 		"       " HELP_SPEC_OPTIONS " |\n"
