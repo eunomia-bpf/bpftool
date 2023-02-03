@@ -469,23 +469,37 @@ btf_dump_map_struct_layout(const struct btf *btf, struct btf_dump *d, __u32 id) 
 	uint32_t struct_size, off = 0, pad_cnt = 0;
 	uint32_t offset;
 	__u16 vlen;
-	const struct btf_type* field_type;
 	const struct btf_type * t = btf__type_by_id(btf, id);
     if (!t) {
 		return -EINVAL;
     }
     name = btf__name_by_offset(btf, t->name_off);
+	if (!name) {
+		return -EINVAL;
+	}
     if (!btf_is_struct(t)) {
-		err = btf_dump__dump_type(d, id);
-		return err;
+		return 0;
     }
+	printf("\nstruct %s {\n", name);
     m = btf_members(t);
     vlen = BTF_INFO_VLEN(t->info);
     struct_size = btf__resolve_size(btf, id);
     for (size_t i = 0; i < vlen; i++, m++) {
         // found btf type id
         uint32_t bit_off, bit_sz;
-
+		const struct btf_type* field_type;
+		const char* field_name = btf__name_by_offset(btf, m->name_off);
+		DECLARE_LIBBPF_OPTS(btf_dump_emit_type_decl_opts, opts,
+                        .field_name = field_name, .indent_level = 2,
+                        .strip_mods = false, );
+		if (!field_name) {
+			continue;
+		}
+		field_type = btf__type_by_id(btf, m->type);
+		if (!field_type) {
+			fprintf(stderr, "error: field_type is null for %s", field_name);
+			continue;
+		}
         if (BTF_INFO_KFLAG(t->info)) {
             bit_off = BTF_MEMBER_BIT_OFFSET(m->offset);
             bit_sz = BTF_MEMBER_BITFIELD_SIZE(m->offset);
@@ -494,8 +508,11 @@ btf_dump_map_struct_layout(const struct btf *btf, struct btf_dump *d, __u32 id) 
             bit_off = m->offset;
             bit_sz = 0;
         }
+		if (bit_sz > 0) {
+			fprintf(stderr, "error: bitfield is not supported for %s", field_name);
+			continue;
+		}
         field_size = btf__resolve_size(btf, m->type);
-        field_type = btf__type_by_id(btf, m->type);
 
 		offset = bit_off / 8;
 		if (off > offset) {
@@ -530,14 +547,22 @@ btf_dump_map_struct_layout(const struct btf *btf, struct btf_dump *d, __u32 id) 
 			}
 		}
 		printf("    ");
-		err = btf_dump__dump_type(d, id);
+		err = btf_dump__emit_type_decl(d, m->type, &opts);
 		if (err) {
+			fprintf(stderr, "error: fail to dump type %d\n", m->type);
 			return err;
 		}
 		printf(";\n");
 
 		off = offset + field_size;
     }
+	if (off < struct_size) {
+		printf("    char __pad%d[%d];\n", pad_cnt,
+                               struct_size - off);
+    }
+    printf("} __attribute__((packed));\n");
+    printf("static_assert(sizeof(struct %s) == %d, \"Size of %s is not %d\");\n\n", name,
+		  struct_size, name, struct_size);
 	return 0;
 }
 
@@ -552,7 +577,11 @@ static int dump_btf_wasm(const struct btf *btf,
 	if (!d)
 		return -errno;
 	printf("#ifndef _BPF_WASM_EVENT_H_\n");
-	printf("#define _BPF_WASM_EVENT_H_\n");
+	printf("#define _BPF_WASM_EVENT_H_\n\n");
+	printf("#include <stdint.h>\n");
+	printf("#include <stddef.h>\n");
+	printf("#include <stdbool.h>\n");
+	printf("#include <assert.h>\n");
 
 	if (root_type_cnt) {
 		for (i = 0; i < root_type_cnt; i++) {
@@ -574,7 +603,7 @@ static int dump_btf_wasm(const struct btf *btf,
 	printf("#endif /* __VMLINUX_H__ */\n");
 
 done:
-	btf_dump__free(d);
+	// btf_dump__free(d);
 	return err;
 }
 
@@ -816,7 +845,7 @@ static int do_dump(int argc, char **argv)
 	} else if (dump_wasm) {
 		err = dump_btf_wasm(btf, root_type_ids, root_type_cnt);
 	}
-	 else {
+	else {
 		err = dump_btf_raw(btf, root_type_ids, root_type_cnt);
 	}
 
