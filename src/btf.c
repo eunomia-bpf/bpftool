@@ -835,7 +835,6 @@ static int do_dump(int argc, char **argv)
 
 	if (dump_c) {
 		if (json_output) {
-			p_err("JSON output for C-syntax dump is not supported, emit wasm instead");
 			emit_for_wasm = true;
 		}
 		if (emit_for_wasm) {
