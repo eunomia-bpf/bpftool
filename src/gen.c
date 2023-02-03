@@ -892,7 +892,7 @@ codegen_progs_skeleton(struct bpf_object *obj, size_t prog_cnt, bool populate_li
 			",
 			i, bpf_program__name(prog));
 
-		if (populate_links) {
+		if (populate_links && !emit_for_wasm) {
 			codegen("\
 				\n\
 					s->progs[%1$zu].link = &obj->links.%2$s;\n\
