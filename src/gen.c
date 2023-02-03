@@ -209,6 +209,93 @@ static int codegen_datasec_def(struct bpf_object *obj,
 	return 0;
 }
 
+static int codegen_datasec_def_wasm(struct bpf_object *obj,
+			       struct btf *btf,
+			       struct btf_dump *d,
+			       const struct btf_type *sec,
+			       const char *obj_name)
+{
+	const char *sec_name = btf__name_by_offset(btf, sec->name_off);
+	const struct btf_var_secinfo *sec_var = btf_var_secinfos(sec);
+	int i, err, off = 0, pad_cnt = 0, vlen = btf_vlen(sec);
+	char var_ident[256], sec_ident[256];
+	bool strip_mods = false;
+
+	if (!get_datasec_ident(sec_name, sec_ident, sizeof(sec_ident)))
+		return 0;
+
+	if (strcmp(sec_name, ".kconfig") != 0)
+		strip_mods = true;
+
+	printf("	struct %s__%s {\n", obj_name, sec_ident);
+	for (i = 0; i < vlen; i++, sec_var++) {
+		const struct btf_type *var = btf__type_by_id(btf, sec_var->type);
+		const char *var_name = btf__name_by_offset(btf, var->name_off);
+		struct btf_type *var_type = NULL;
+		DECLARE_LIBBPF_OPTS(btf_dump_emit_type_decl_opts, opts,
+			.field_name = var_ident,
+			.indent_level = 2,
+			.strip_mods = strip_mods,
+		);
+		int need_off = sec_var->offset;
+		__u32 var_type_id = var->type;
+
+		/* static variables are not exposed through BPF skeleton */
+		if (btf_var(var)->linkage == BTF_VAR_STATIC)
+			continue;
+
+		if (off > need_off) {
+			fprintf(stderr, "Something is wrong for %s's variable #%d: need offset %d, already at %d.\n",
+			      sec_name, i, need_off, off);
+			return -EINVAL;
+		}
+		if (off < need_off) {
+			printf("\t\tchar __pad%d[%d];\n",
+			       pad_cnt, need_off - off);
+			pad_cnt++;
+		}
+
+		/* sanitize variable name, e.g., for static vars inside
+		 * a function, it's name is '<function name>.<variable name>',
+		 * which we'll turn into a '<function name>_<variable name>'
+		 */
+		var_ident[0] = '\0';
+		strncat(var_ident, var_name, sizeof(var_ident) - 1);
+		sanitize_identifier(var_ident);
+
+		printf("\t\t");
+		// avoid pointer use
+		var_type = btf_type_by_id(btf, var_type_id);
+		if (!var_type) {
+			fprintf(stderr, "Failed to find type for variable %s\n", var_name);
+			return -EINVAL;
+		}
+		if (btf_is_ptr(var_type)) {
+			int ptr_type_id = -1;
+			int ptr_size = btf__pointer_size(btf);
+			if (ptr_size == 8) {
+				printf("uint64_t /* pointer */ %s", var_ident);
+			}
+			else if (ptr_size == 4) {
+				printf("uint32_t /* pointer */ %s", var_ident);
+			}
+			else {
+				fprintf(stderr, "error: unsupported pointer size %d\n", ptr_size);
+			}
+		} else {
+			err = btf_dump__emit_type_decl(d, var_type_id, &opts);
+			if (err)
+				return err;
+		}
+		printf(";\n");
+
+		off = sec_var->offset + sec_var->size;
+	}
+	printf("	} *%s;\n", sec_ident);
+	return 0;
+}
+
+
 static const struct btf_type *find_type_for_map(struct btf *btf, const char *map_ident)
 {
 	int n = btf__type_cnt(btf), i;
@@ -273,7 +360,11 @@ static int codegen_datasecs(struct bpf_object *obj, const char *obj_name)
 			printf("	struct %s__%s {\n", obj_name, map_ident);
 			printf("	} *%s;\n", map_ident);
 		} else {
-			err = codegen_datasec_def(obj, btf, d, sec, obj_name);
+			if (emit_for_wasm) {
+				err = codegen_datasec_def_wasm(obj, btf, d, sec, obj_name);
+			} else {
+				err = codegen_datasec_def(obj, btf, d, sec, obj_name);
+			}
 			if (err)
 				goto out;
 		}

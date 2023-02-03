@@ -487,6 +487,7 @@ btf_dump_map_struct_layout(const struct btf *btf, struct btf_dump *d, __u32 id) 
     for (size_t i = 0; i < vlen; i++, m++) {
         // found btf type id
         uint32_t bit_off, bit_sz;
+		int file_type_id = m->type;
 		const struct btf_type* field_type;
 		const char* field_name = btf__name_by_offset(btf, m->name_off);
 		DECLARE_LIBBPF_OPTS(btf_dump_emit_type_decl_opts, opts,
@@ -495,9 +496,9 @@ btf_dump_map_struct_layout(const struct btf *btf, struct btf_dump *d, __u32 id) 
 		if (!field_name) {
 			continue;
 		}
-		field_type = btf__type_by_id(btf, m->type);
+		field_type = btf__type_by_id(btf, file_type_id);
 		if (!field_type) {
-			fprintf(stderr, "error: field_type is null for %s", field_name);
+			fprintf(stderr, "error: field_type is null for %s\n", field_name);
 			continue;
 		}
         if (BTF_INFO_KFLAG(t->info)) {
@@ -509,14 +510,14 @@ btf_dump_map_struct_layout(const struct btf *btf, struct btf_dump *d, __u32 id) 
             bit_sz = 0;
         }
 		if (bit_sz > 0) {
-			fprintf(stderr, "error: bitfield is not supported for %s", field_name);
+			fprintf(stderr, "error: bitfield is not supported for %s\n", field_name);
 			continue;
 		}
-        field_size = btf__resolve_size(btf, m->type);
+        field_size = btf__resolve_size(btf, file_type_id);
 
 		offset = bit_off / 8;
 		if (off > offset) {
-			printf("error: offset %d > need_off %d for %s", off, offset, name);
+			printf("error: offset %d > need_off %d for %s\n", off, offset, name);
 		}
 		if (off < offset) {
 			printf("    char __pad%d[%d];\n", pad_cnt,
@@ -545,11 +546,12 @@ btf_dump_map_struct_layout(const struct btf *btf, struct btf_dump *d, __u32 id) 
 			if (ptr_type_id < 0) {
 				fprintf(stderr, "error: fail to find pointer type\n");
 			}
+			file_type_id = ptr_type_id;
 		}
 		printf("    ");
-		err = btf_dump__emit_type_decl(d, m->type, &opts);
+		err = btf_dump__emit_type_decl(d, file_type_id, &opts);
 		if (err) {
-			fprintf(stderr, "error: fail to dump type %d\n", m->type);
+			fprintf(stderr, "error: fail to dump type %d\n", file_type_id);
 			return err;
 		}
 		printf(";\n");
