@@ -460,6 +460,36 @@ static void __printf(2, 0) btf_dump_printf(void *ctx,
 	vfprintf(stdout, fmt, args);
 }
 
+static void print_pointer_def(const struct btf *btf, const char* field_name) {
+	int ptr_size = btf__pointer_size(btf);
+	if (ptr_size == 8) {
+		printf("    uint64_t %s;\n", field_name);
+	}
+	else if (ptr_size == 4) {
+		printf("    uint32_t %s;\n", field_name);
+	}
+	else {
+		fprintf(stderr, "error: unsupported pointer size %d\n", ptr_size);
+	}
+}
+
+static bool is_composit_array(const struct btf *btf, const struct btf_type *t) {
+	const struct btf_type *elem_type;
+	const struct btf_array *a;
+	if (!t || !btf_is_array(t)) {
+		return false;
+	}
+	a = btf_array(t);
+	if (!a) {
+		return false;
+	}
+	elem_type = btf__type_by_id(btf, a->type);
+	if (!elem_type) {
+		return false;
+	}
+	return btf_is_array(elem_type) || btf_is_struct(elem_type) || btf_is_union(elem_type);
+}
+
 static int
 btf_dump_map_struct_layout(const struct btf *btf, struct btf_dump *d, __u32 id) {
 	int err;
@@ -474,10 +504,21 @@ btf_dump_map_struct_layout(const struct btf *btf, struct btf_dump *d, __u32 id) 
 		return -EINVAL;
     }
     name = btf__name_by_offset(btf, t->name_off);
-	if (!name) {
-		return -EINVAL;
+	if (!name || strcmp(name, "") == 0) {
+		// skip anonymous types
+		return 0;
 	}
     if (!btf_is_struct(t)) {
+		if (btf_is_ptr(t)) {
+			// pointer type: emit type def
+			print_pointer_def(btf, name);
+			return 0;
+		}
+		if (!btf_is_composite(t) || is_composit_array(btf, t)) {
+			// basic types: emit type def
+			btf_dump__dump_type(d, id);
+			return 0;
+		}
 		return 0;
     }
 	printf("\nstruct %s {\n", name);
@@ -493,15 +534,7 @@ btf_dump_map_struct_layout(const struct btf *btf, struct btf_dump *d, __u32 id) 
 		DECLARE_LIBBPF_OPTS(btf_dump_emit_type_decl_opts, opts,
                         .field_name = field_name, .indent_level = 2,
                         .strip_mods = false, );
-		if (!field_name) {
-			continue;
-		}
-		field_type = btf__type_by_id(btf, file_type_id);
-		if (!field_type) {
-			fprintf(stderr, "error: field_type is null for %s\n", field_name);
-			continue;
-		}
-        if (BTF_INFO_KFLAG(t->info)) {
+		if (BTF_INFO_KFLAG(t->info)) {
             bit_off = BTF_MEMBER_BIT_OFFSET(m->offset);
             bit_sz = BTF_MEMBER_BITFIELD_SIZE(m->offset);
         }
@@ -510,43 +543,38 @@ btf_dump_map_struct_layout(const struct btf *btf, struct btf_dump *d, __u32 id) 
             bit_sz = 0;
         }
 		if (bit_sz > 0) {
-			fprintf(stderr, "error: bitfield is not supported for %s\n", field_name);
+			// fprintf(stderr, "error: bitfield is not supported for %s\n", field_name);
 			continue;
 		}
-        field_size = btf__resolve_size(btf, file_type_id);
-
+		field_size = btf__resolve_size(btf, file_type_id);
 		offset = bit_off / 8;
+		if (!field_name || strcmp(field_name, "") == 0) {
+			// skip unnamed fields
+			continue;
+		}
+		field_type = btf__type_by_id(btf, file_type_id);
+		if (!field_type) {
+			fprintf(stderr, "error: field_type is null for %s\n", field_name);
+			return -1;
+		}
 		if (off > offset) {
 			printf("error: offset %d > need_off %d for %s\n", off, offset, name);
+			return -1;
 		}
 		if (off < offset) {
 			printf("    char __pad%d[%d];\n", pad_cnt,
 								offset - off);
 			pad_cnt++;
+			off = offset;
+		}
+		if (btf_is_composite(field_type) || is_composit_array(btf, t)) {
+			// composite type: skip for nested struct now
+			continue;
 		}
 		// avid pointer use
 		if (btf_is_ptr(field_type)) {
-			int ptr_type_id = -1;
-			int ptr_size = btf__pointer_size(btf);
-			if (ptr_size == 8) {
-				ptr_type_id = btf__find_by_name(btf, "uint64_t");
-				if (ptr_type_id < 0) {
-					ptr_type_id = btf__add_int((struct btf *)btf, "uint64_t", 8, 0);
-				}
-			}
-			else if (ptr_size == 4) {
-				ptr_type_id = btf__find_by_name(btf, "uint32_t");
-				if (ptr_type_id < 0) {
-					ptr_type_id = btf__add_int((struct btf *)btf, "uint32_t", 4, 0);
-				}
-			}
-			else {
-				fprintf(stderr, "error: unsupported pointer size %d\n", ptr_size);
-			}
-			if (ptr_type_id < 0) {
-				fprintf(stderr, "error: fail to find pointer type\n");
-			}
-			file_type_id = ptr_type_id;
+			print_pointer_def(btf, field_name);
+			continue;
 		}
 		printf("    ");
 		err = btf_dump__emit_type_decl(d, file_type_id, &opts);
