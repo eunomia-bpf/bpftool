@@ -4,6 +4,7 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
+#include <gelf.h>
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -271,7 +272,6 @@ static int codegen_datasec_def_wasm(struct bpf_object *obj,
 			return -EINVAL;
 		}
 		if (btf_is_ptr(var_type)) {
-			int ptr_type_id = -1;
 			int ptr_size = btf__pointer_size(btf);
 			if (ptr_size == 8) {
 				printf("uint64_t /* pointer */ %s", var_ident);
@@ -994,6 +994,91 @@ codegen_progs_skeleton(struct bpf_object *obj, size_t prog_cnt, bool populate_li
 	}
 }
 
+
+#define warn(...) fprintf(stderr, __VA_ARGS__)
+
+/*
+ * Opens an elf at `path` of kind ELF_K_ELF.  Returns NULL on failure.  On
+ * success, close with close_elf(e, fd_close).
+ */
+static Elf *open_elf(const char *path, int *fd_close)
+{
+	int fd;
+	Elf *e;
+
+	if (elf_version(EV_CURRENT) == EV_NONE) {
+		warn("elf init failed\n");
+		return NULL;
+	}
+	fd = open(path, O_RDONLY);
+	if (fd < 0) {
+		warn("Could not open %s\n", path);
+		return NULL;
+	}
+	e = elf_begin(fd, ELF_C_READ, NULL);
+	if (!e) {
+		warn("elf_begin failed: %s\n", elf_errmsg(-1));
+		close(fd);
+		return NULL;
+	}
+	if (elf_kind(e) != ELF_K_ELF) {
+		warn("elf kind %d is not ELF_K_ELF\n", elf_kind(e));
+		elf_end(e);
+		close(fd);
+		return NULL;
+	}
+	*fd_close = fd;
+	return e;
+}
+
+static void close_elf(Elf *e, int fd_close)
+{
+	elf_end(e);
+	close(fd_close);
+}
+
+static int get_elf_section_offset(const char *path)
+{
+	off_t ret = -1;
+	int fd = -1;
+	Elf *e;
+	Elf_Scn *scn;
+	GElf_Ehdr ehdr;
+	Elf64_Shdr *sh;
+	char* name;
+	size_t shstrndx;
+
+	e = open_elf(path, &fd);
+
+	if (!gelf_getehdr(e, &ehdr))
+		goto out;
+
+	if (elf_getshdrstrndx(e, &shstrndx) != 0)
+		goto out;
+
+	scn = NULL;
+	while ((scn = elf_nextscn(e, scn))) {
+		sh = elf64_getshdr(scn);
+		if (!sh)
+			return -LIBBPF_ERRNO__FORMAT;
+		name = elf_strptr(e, shstrndx, sh->sh_name);
+		if (!name)
+			return -LIBBPF_ERRNO__FORMAT;
+		// get elf section offset
+		// p_err("section name: %s, offset: %ld\n", name, sh->sh_offset);
+		if (strcmp(".rodata", name) == 0) {
+			printf("    s->rodata_offset = %ld;\n", sh->sh_offset);
+		} else if (strcmp(".bss", name) == 0) {
+			printf("    s->bss_offset = %ld;\n", sh->sh_offset);
+		} 
+	}
+
+out:
+	close_elf(e, fd);
+	return ret;
+}
+
+
 static int do_skeleton(int argc, char **argv)
 {
 	char header_guard[MAX_OBJ_NAME_LEN + sizeof("__SKEL_H__")];
@@ -1315,6 +1400,9 @@ static int do_skeleton(int argc, char **argv)
 		",
 		obj_name
 	);
+	if (emit_for_wasm) {
+		get_elf_section_offset(file);
+	}
 
 	codegen_maps_skeleton(obj, map_cnt, true /*mmaped*/);
 	codegen_progs_skeleton(obj, prog_cnt, true /*populate_links*/);
