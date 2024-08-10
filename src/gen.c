@@ -1416,7 +1416,7 @@ static int do_skeleton(int argc, char **argv)
 		printf("\t} progs;\n");
 	}
 
-	if (prog_cnt + attach_map_cnt) {
+	if (prog_cnt + attach_map_cnt && !json_output) {
 		printf("\tstruct {\n");
 		bpf_object__for_each_program(prog, obj) {
 			if (use_loader)
