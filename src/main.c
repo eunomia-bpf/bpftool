@@ -31,6 +31,7 @@ bool block_mount;
 bool verifier_logs;
 bool relaxed_maps;
 bool use_loader;
+bool emit_for_wasm = false;
 struct btf *base_btf;
 struct hashmap *refs_table;
 
@@ -448,6 +449,7 @@ int main(int argc, char **argv)
 		{ "debug",	no_argument,	NULL,	'd' },
 		{ "use-loader",	no_argument,	NULL,	'L' },
 		{ "base-btf",	required_argument, NULL, 'B' },
+		{ "wasm",	no_argument,	NULL,	'w' },
 		{ 0 }
 	};
 	bool version_requested = false;
@@ -468,12 +470,13 @@ int main(int argc, char **argv)
 	last_do_help = do_help;
 	pretty_output = false;
 	json_output = false;
+	emit_for_wasm = false;
 	show_pinned = false;
 	block_mount = false;
 	bin_name = "bpftool";
 
 	opterr = 0;
-	while ((opt = getopt_long(argc, argv, "VhpjfLmndB:l",
+	while ((opt = getopt_long(argc, argv, "VhpjwfLmndB:l",
 				  options, NULL)) >= 0) {
 		switch (opt) {
 		case 'V':
@@ -518,6 +521,9 @@ int main(int argc, char **argv)
 			break;
 		case 'L':
 			use_loader = true;
+			break;
+		case 'w':
+			emit_for_wasm = true;
 			break;
 		default:
 			p_err("unrecognized option '%s'", argv[optind - 1]);

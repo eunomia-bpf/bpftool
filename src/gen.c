@@ -4,6 +4,7 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
+#include <gelf.h>
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -266,6 +267,84 @@ static int codegen_datasec_def(struct bpf_object *obj,
 	return 0;
 }
 
+static int codegen_datasec_def_wasm(struct bpf_object *obj,
+				    struct btf *btf,
+				    struct btf_dump *d,
+				    const struct btf_type *sec,
+				    const char *obj_name)
+{
+	const char *sec_name = btf__name_by_offset(btf, sec->name_off);
+	const struct btf_var_secinfo *sec_var = btf_var_secinfos(sec);
+	int i, err, off = 0, pad_cnt = 0, vlen = btf_vlen(sec);
+	char var_ident[256], sec_ident[256];
+	bool strip_mods = false;
+
+	if (!get_datasec_ident(sec_name, sec_ident, sizeof(sec_ident)))
+		return 0;
+
+	if (strcmp(sec_name, ".kconfig") != 0)
+		strip_mods = true;
+
+	printf("	struct %s__%s {\n", obj_name, sec_ident);
+	for (i = 0; i < vlen; i++, sec_var++) {
+		const struct btf_type *var = btf__type_by_id(btf, sec_var->type);
+		const char *var_name = btf__name_by_offset(btf, var->name_off);
+		const struct btf_type *var_type = NULL;
+		DECLARE_LIBBPF_OPTS(btf_dump_emit_type_decl_opts, opts,
+			.field_name = var_ident,
+			.indent_level = 2,
+			.strip_mods = strip_mods,
+		);
+		int need_off = sec_var->offset;
+		__u32 var_type_id = var->type;
+
+		if (btf_var(var)->linkage == BTF_VAR_STATIC)
+			continue;
+
+		if (off > need_off) {
+			p_err("Something is wrong for %s's variable #%d: need offset %d, already at %d.",
+			      sec_name, i, need_off, off);
+			return -EINVAL;
+		}
+		if (off < need_off) {
+			printf("\t\tchar __pad%d[%d];\n", pad_cnt, need_off - off);
+			pad_cnt++;
+		}
+
+		var_ident[0] = '\0';
+		strncat(var_ident, var_name, sizeof(var_ident) - 1);
+		sanitize_identifier(var_ident);
+
+		printf("\t\t");
+		var_type = btf__type_by_id(btf, var_type_id);
+		if (!var_type) {
+			p_err("Failed to find type for variable %s", var_name);
+			return -EINVAL;
+		}
+		if (btf_is_ptr(var_type)) {
+			size_t ptr_size = btf__pointer_size(btf);
+
+			if (ptr_size == 8)
+				printf("uint64_t /* pointer */ %s", var_ident);
+			else if (ptr_size == 4)
+				printf("uint32_t /* pointer */ %s", var_ident);
+			else {
+				p_err("unsupported pointer size %zu", ptr_size);
+				return -EINVAL;
+			}
+		} else {
+			err = btf_dump__emit_type_decl(d, var_type_id, &opts);
+			if (err)
+				return err;
+		}
+		printf(";\n");
+
+		off = sec_var->offset + sec_var->size;
+	}
+	printf("	} *%s;\n", sec_ident);
+	return 0;
+}
+
 static const struct btf_type *find_type_for_map(struct btf *btf, const char *map_ident)
 {
 	int n = btf__type_cnt(btf), i;
@@ -344,7 +423,10 @@ static int codegen_datasecs(struct bpf_object *obj, const char *obj_name)
 			printf("	struct %s__%s {\n", obj_name, map_ident);
 			printf("	} *%s;\n", map_ident);
 		} else {
-			err = codegen_datasec_def(obj, btf, d, sec, obj_name);
+			if (emit_for_wasm)
+				err = codegen_datasec_def_wasm(obj, btf, d, sec, obj_name);
+			else
+				err = codegen_datasec_def(obj, btf, d, sec, obj_name);
 			if (err)
 				goto out;
 		}
@@ -1047,6 +1129,78 @@ codegen_progs_skeleton(struct bpf_object *obj, size_t prog_cnt, bool populate_li
 	}
 }
 
+#define warn(...) fprintf(stderr, __VA_ARGS__)
+
+static Elf *open_elf(const char *path, int *fd_close)
+{
+	int fd;
+	Elf *e;
+
+	if (elf_version(EV_CURRENT) == EV_NONE) {
+		warn("elf init failed\n");
+		return NULL;
+	}
+	fd = open(path, O_RDONLY);
+	if (fd < 0) {
+		warn("Could not open %s\n", path);
+		return NULL;
+	}
+	e = elf_begin(fd, ELF_C_READ, NULL);
+	if (!e) {
+		warn("elf_begin failed: %s\n", elf_errmsg(-1));
+		close(fd);
+		return NULL;
+	}
+	if (elf_kind(e) != ELF_K_ELF) {
+		warn("elf kind %d is not ELF_K_ELF\n", elf_kind(e));
+		elf_end(e);
+		close(fd);
+		return NULL;
+	}
+	*fd_close = fd;
+	return e;
+}
+
+static void close_elf(Elf *e, int fd_close)
+{
+	elf_end(e);
+	close(fd_close);
+}
+
+static int get_elf_section_offset(const char *path)
+{
+	int fd = -1;
+	Elf *e;
+	Elf_Scn *scn = NULL;
+	GElf_Shdr sh;
+	size_t shstrndx;
+
+	e = open_elf(path, &fd);
+	if (!e)
+		return -1;
+	if (elf_getshdrstrndx(e, &shstrndx) != 0) {
+		close_elf(e, fd);
+		return -1;
+	}
+
+	while ((scn = elf_nextscn(e, scn)) != NULL) {
+		char *name;
+
+		if (!gelf_getshdr(scn, &sh))
+			continue;
+		name = elf_strptr(e, shstrndx, sh.sh_name);
+		if (!name)
+			continue;
+		if (strcmp(name, ".rodata") == 0)
+			printf("\ts->rodata_offset = %ld;\n", (long)sh.sh_offset);
+		else if (strcmp(name, ".bss") == 0)
+			printf("\ts->bss_offset = %ld;\n", (long)sh.sh_offset);
+	}
+
+	close_elf(e, fd);
+	return 0;
+}
+
 static int walk_st_ops_shadow_vars(struct btf *btf, const char *ident,
 				   const struct btf_type *map_type, __u32 map_type_id)
 {
@@ -1362,6 +1516,25 @@ static int do_skeleton(int argc, char **argv)
 		",
 		obj_name, header_guard
 		);
+	} else if (emit_for_wasm) {
+		codegen("\
+		\n\
+		/* SPDX-License-Identifier: (LGPL-2.1 OR BSD-2-Clause) */   \n\
+									    \n\
+		/* THIS FILE IS AUTOGENERATED BY BPFTOOL! */		    \n\
+		#ifndef %2$s						    \n\
+		#define %2$s						    \n\
+									    \n\
+		#include <errno.h>					    \n\
+		#include <stdlib.h>					    \n\
+		#include \"libbpf-wasm.h\"				    \n\
+									    \n\
+		struct %1$s {						    \n\
+			struct bpf_object_skeleton *skeleton;		    \n\
+			struct bpf_object *obj;				    \n\
+		",
+		obj_name, header_guard
+		);
 	} else {
 		codegen("\
 		\n\
@@ -1416,7 +1589,7 @@ static int do_skeleton(int argc, char **argv)
 		printf("\t} progs;\n");
 	}
 
-	if (prog_cnt + attach_map_cnt && !json_output) {
+	if (prog_cnt + attach_map_cnt && !json_output && !emit_for_wasm) {
 		printf("\tstruct {\n");
 		bpf_object__for_each_program(prog, obj) {
 			if (use_loader)
@@ -1584,13 +1757,18 @@ static int do_skeleton(int argc, char **argv)
 									    \n\
 			s->sz = sizeof(*s);				    \n\
 			s->name = \"%1$s\";				    \n\
-			s->obj = &obj->obj;				    \n\
 		",
 		obj_name
 	);
 
-	codegen_maps_skeleton(obj, map_cnt, true /*mmaped*/, true /*links*/);
-	codegen_progs_skeleton(obj, prog_cnt, true /*populate_links*/);
+	if (emit_for_wasm) {
+		get_elf_section_offset(file);
+	} else {
+		printf("\ts->obj = &obj->obj;\n");
+	}
+
+	codegen_maps_skeleton(obj, map_cnt, true /*mmaped*/, !emit_for_wasm);
+	codegen_progs_skeleton(obj, prog_cnt, !emit_for_wasm);
 
 	codegen("\
 		\n\
